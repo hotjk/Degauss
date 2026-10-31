@@ -23929,6 +23929,15 @@ impl App {
             return;
         }
         if let Some(resume) = &saved.home {
+            // A Home pin sets `home` so B can return to that entry. After a
+            // game, prefer the browse trail that was actually left (outer
+            // state, else `home.anchor`) instead of dumping onto Home alone.
+            if let Some(browse) = crate::state::browse_state_for_home_resume(saved) {
+                self.home.origin = Some(resume.clone());
+                self.restore_position(&browse);
+                self.home.origin = Some(resume.clone());
+                return;
+            }
             self.restore_home(resume.clone());
             return;
         }

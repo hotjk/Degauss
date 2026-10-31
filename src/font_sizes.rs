@@ -35,3 +35,8 @@ pub const SMOOTH_TEXT_SIZES: [[f32; 5]; 5] = [
 /// The pixel fonts have dedicated grid-aligned faces at these base sizes.
 /// A larger screen uses the same face at two, three or four times its base.
 pub const PIXEL_TEXT_BASE_SIZES: [f32; 5] = [8.0, 10.0, 12.0, 14.0, 16.0];
+
+/// Alibaba PuHuiTi (personal CJK option). Chinese is opt-in via Appearance →
+/// Text → PuHui. Slint's software embed always seeds 12px; 26 is the list
+/// default rung used for readable titles.
+pub const PUHUI_SIZES: [f32; 2] = [12.0, 26.0];

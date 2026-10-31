@@ -249,6 +249,31 @@ pub fn take_position(resuming: bool, path: &Path) -> Option<State> {
     (!saved.system.is_empty() || saved.home.is_some() || saved.explore.is_some()).then_some(saved)
 }
 
+fn state_has_browse_resume(saved: &State) -> bool {
+    !saved.system.is_empty() || saved.explore.is_some()
+}
+
+/// When `saved.home` is set after leaving a game, the browse place to restore
+/// instead of the Home screen alone.
+///
+/// Prefers the outer trail (where the game was launched). Falls back to
+/// `home.anchor` (where the pin landed). Pure Home UI with no library system
+/// returns `None` so `restore_home` still runs.
+pub fn browse_state_for_home_resume(saved: &State) -> Option<State> {
+    if state_has_browse_resume(saved) {
+        let mut browse = saved.clone();
+        browse.home = None;
+        return Some(browse);
+    }
+    let anchor = saved.home.as_ref()?.anchor.as_ref()?;
+    if !state_has_browse_resume(anchor) {
+        return None;
+    }
+    let mut browse = (**anchor).clone();
+    browse.home = None;
+    Some(browse)
+}
+
 /// In `/tmp` on purpose: it is gone after a power cycle, so a cold start
 /// still gets the wordmark while returning from a game does not.
 pub const RESUME_MARKER: &str = "/tmp/degauss.resume";
@@ -407,6 +432,57 @@ mod tests {
         );
         assert!(!path.exists());
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn home_resume_prefers_outer_trail_then_anchor() {
+        let home = crate::home::Resume {
+            folder: None,
+            key: "entry:5".into(),
+            anchor: Some(Box::new(State {
+                system: "NES".into(),
+                category: "Console".into(),
+                selected: 0,
+                ..Default::default()
+            })),
+        };
+        let with_outer = State {
+            system: "NES".into(),
+            category: "Console".into(),
+            selected: 107,
+            selected_row: Some("f:/media/fat/games/NES/game.nes".into()),
+            home: Some(home.clone()),
+            ..Default::default()
+        };
+        let browse = browse_state_for_home_resume(&with_outer).unwrap();
+        assert!(browse.home.is_none());
+        assert_eq!(browse.selected, 107);
+        assert_eq!(
+            browse.selected_row.as_deref(),
+            Some("f:/media/fat/games/NES/game.nes")
+        );
+
+        let anchor_only = State {
+            home: Some(home),
+            ..Default::default()
+        };
+        let from_anchor = browse_state_for_home_resume(&anchor_only).unwrap();
+        assert!(from_anchor.home.is_none());
+        assert_eq!(from_anchor.system, "NES");
+        assert_eq!(from_anchor.selected, 0);
+
+        let pure_home = State {
+            home: Some(crate::home::Resume {
+                folder: Some("1".into()),
+                key: "entry:8".into(),
+                anchor: None,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            browse_state_for_home_resume(&pure_home).is_none(),
+            "Home-only pins still use restore_home"
+        );
     }
 
     #[cfg(unix)]

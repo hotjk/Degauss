@@ -27,6 +27,9 @@ mod smooth_larger {
 mod pixel_larger {
     include!(concat!(env!("OUT_DIR"), "/pixel_larger.rs"));
 }
+mod puhui {
+    include!(concat!(env!("OUT_DIR"), "/puhui.rs"));
+}
 
 pub fn register() -> Result<(), slint::PlatformError> {
     let _ = smooth_smaller::FontPack::new()?;
@@ -37,5 +40,8 @@ pub fn register() -> Result<(), slint::PlatformError> {
     let _ = pixel_large::FontPack::new()?;
     let _ = smooth_larger::FontPack::new()?;
     let _ = pixel_larger::FontPack::new()?;
+    // Simplified Chinese face (12 + 26px). Must register before UI text that
+    // may select Font::PuHui; Latin packs never import this typeface.
+    let _ = puhui::FontPack::new()?;
     Ok(())
 }

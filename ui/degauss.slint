@@ -9,13 +9,15 @@
 
 // The second typeface. Importing a font file is what bakes its glyphs into
 // the binary; the first one is named by build.rs, which also makes it the one
-// the renderer falls back to.
+// the renderer falls back to. PuHui (Simplified Chinese) is a separate pack
+// registered at startup — it is not imported here, so Latin faces never bake
+// Han fallbacks.
 import "../assets/fonts/Px437_DOS-V_re_JPN12.ttf";
 import "../assets/fonts/RobotoCondensed-Bold.ttf";
 import "../assets/fonts/Tamzen6x12b.ttf";
 
 // Which characters get glyphs. Written by build.rs, because the answer is
-// "whatever the two fonts above can draw" and that is read off the font
+// "whatever the fonts above can draw" and that is read off the font
 // files rather than written down.
 import { Charset } from "charset.slint";
 

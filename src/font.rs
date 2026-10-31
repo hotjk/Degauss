@@ -85,11 +85,21 @@ pub enum Font {
     /// strokes where Pixel has one. The letterforms sit smaller in the
     /// cell, so it reads thicker but smaller.
     Pixel2,
+    /// Alibaba PuHuiTi: personal Simplified Chinese option, baked at 12px
+    /// and 26px. Chinese game names draw only while this face is selected
+    /// (Appearance → Text, or a theme with `font = "puhui"`).
+    PuHui,
 }
 
 impl Font {
     /// In the order the option cycles through them.
-    pub const ALL: [Font; 4] = [Font::Smooth, Font::Pixel, Font::Smooth2, Font::Pixel2];
+    pub const ALL: [Font; 5] = [
+        Font::Smooth,
+        Font::Pixel,
+        Font::Smooth2,
+        Font::Pixel2,
+        Font::PuHui,
+    ];
 
     /// What `settings.toml` and theme files record. Lowercase in the file,
     /// like every other name written there.
@@ -99,6 +109,7 @@ impl Font {
             Font::Pixel => "pixel",
             Font::Smooth2 => "smooth 2",
             Font::Pixel2 => "pixel 2",
+            Font::PuHui => "puhui",
         }
     }
 
@@ -110,6 +121,7 @@ impl Font {
             Font::Pixel => "Pixel",
             Font::Smooth2 => "Smooth 2",
             Font::Pixel2 => "Pixel 2",
+            Font::PuHui => "PuHui",
         }
     }
 
@@ -122,6 +134,8 @@ impl Font {
             Font::Pixel => "Px437 DOS/V re. JPN12",
             Font::Smooth2 => "Roboto Condensed",
             Font::Pixel2 => "Tamzen",
+            // OpenType name ID 1 on AlibabaPuHuiTi-3-55-Regular.ttf.
+            Font::PuHui => "Alibaba PuHuiTi 3.0 55 Regular",
         }
     }
 
@@ -145,6 +159,7 @@ impl Font {
             (Font::Pixel2, TextSize::Small) => "Tamzen 10",
             (Font::Pixel2, TextSize::Large) => "Tamzen 14",
             (Font::Pixel2, TextSize::Larger) => "Tamzen 16",
+            // PuHui has a single baked face; Text Size presets keep the same family.
             _ => self.family(),
         }
     }
@@ -153,6 +168,10 @@ impl Font {
     /// preset size. This preserves the exact default and the existing
     /// resolution-dependent text scale without changing row geometry.
     pub fn text_glyph(self, request: f32, size: TextSize) -> f32 {
+        if matches!(self, Font::PuHui) {
+            // No Text Size packs: round onto the 12/26 ladder only.
+            return self.quantise(request);
+        }
         let baseline = self.quantise(request);
         let rung = self
             .sizes()
@@ -162,6 +181,7 @@ impl Font {
         match self {
             Font::Smooth | Font::Smooth2 => SMOOTH_TEXT_SIZES[rung][size.index()],
             Font::Pixel | Font::Pixel2 => PIXEL_TEXT_BASE_SIZES[size.index()] * (rung + 1) as f32,
+            Font::PuHui => self.quantise(request),
         }
     }
 
@@ -170,6 +190,7 @@ impl Font {
         match self {
             Font::Smooth | Font::Smooth2 => &SMOOTH_SIZES,
             Font::Pixel | Font::Pixel2 => &PIXEL_SIZES,
+            Font::PuHui => &PUHUI_SIZES,
         }
     }
 
@@ -187,17 +208,19 @@ impl Font {
             Font::Smooth => Font::Pixel,
             Font::Pixel => Font::Smooth2,
             Font::Smooth2 => Font::Pixel2,
-            Font::Pixel2 => Font::Smooth,
+            Font::Pixel2 => Font::PuHui,
+            Font::PuHui => Font::Smooth,
         }
     }
 
     /// The previous one, used by left in Options.
     pub fn prev(self) -> Font {
         match self {
-            Font::Smooth => Font::Pixel2,
+            Font::Smooth => Font::PuHui,
             Font::Pixel => Font::Smooth,
             Font::Smooth2 => Font::Pixel,
             Font::Pixel2 => Font::Smooth2,
+            Font::PuHui => Font::Pixel2,
         }
     }
 
@@ -286,8 +309,8 @@ mod tests {
             assert_eq!(font.prev().next(), font);
             assert_eq!(font.next().prev(), font);
         }
-        assert_eq!(Font::Smooth.prev(), Font::Pixel2, "left wraps backward");
-        assert_eq!(Font::Pixel2.next(), Font::Smooth, "right wraps forward");
+        assert_eq!(Font::Smooth.prev(), Font::PuHui, "left wraps backward");
+        assert_eq!(Font::PuHui.next(), Font::Smooth, "right wraps forward");
     }
 
     #[test]
@@ -299,11 +322,20 @@ mod tests {
                     .map(|size| font.text_glyph(request, size))
                     .collect();
                 assert_eq!(rendered[2], font.quantise(request));
-                assert!(rendered.windows(2).all(|pair| pair[0] < pair[1]));
                 assert_eq!(font.text_family(TextSize::Default), font.family());
-                for size in TextSize::ALL {
-                    if size != TextSize::Default {
-                        assert_ne!(font.text_family(size), font.family());
+                if matches!(font, Font::PuHui) {
+                    // No Text Size packs: every preset keeps the same family;
+                    // glyph size is quantised onto the 12/26 ladder.
+                    assert_eq!(rendered[2], font.quantise(request));
+                    for size in TextSize::ALL {
+                        assert_eq!(font.text_family(size), font.family());
+                    }
+                } else {
+                    assert!(rendered.windows(2).all(|pair| pair[0] < pair[1]));
+                    for size in TextSize::ALL {
+                        if size != TextSize::Default {
+                            assert_ne!(font.text_family(size), font.family());
+                        }
                     }
                 }
             }
@@ -339,6 +371,11 @@ mod tests {
             .expect("the build writes the compiled interface here")
     }
 
+    fn generated_puhui() -> String {
+        std::fs::read_to_string(concat!(env!("OUT_DIR"), "/puhui.rs"))
+            .expect("the build writes the PuHui font pack here")
+    }
+
     #[test]
     fn both_typefaces_are_in_the_binary_under_the_names_asked_for() {
         // A family name that does not match one the build embedded is not an
@@ -346,9 +383,15 @@ mod tests {
         // to the first font it has, so the option would appear to do nothing
         // at all. One typo either side of this is invisible without it.
         let generated = generated_ui();
+        let puhui = generated_puhui();
         for font in Font::ALL {
+            let source = if matches!(font, Font::PuHui) {
+                &puhui
+            } else {
+                &generated
+            };
             assert!(
-                generated.contains(&format!("{:?}", font.family())),
+                source.contains(&format!("{:?}", font.family())),
                 "{:?} is not embedded under the name {:?}",
                 font,
                 font.family()
@@ -362,16 +405,46 @@ mod tests {
         // largest smaller one instead, which for the pixel font means
         // off-grid glyphs and for either means the wrong size.
         let generated = generated_ui();
+        let puhui = generated_puhui();
         for font in Font::ALL {
+            let source = if matches!(font, Font::PuHui) {
+                &puhui
+            } else {
+                &generated
+            };
             for size in font.sizes() {
                 assert!(
-                    generated.contains(&format!("pixel_size : {size}i16")),
+                    source.contains(&format!("pixel_size : {size}i16")),
                     "{:?} asks for {size} and the build did not bake it",
                     font
                 );
             }
         }
     }
+
+    #[test]
+    fn puhui_bakes_a_han_glyph_and_latin_faces_do_not() {
+        let han = '\u{4e00}'; // 一
+        let puhui = generated_puhui();
+        assert!(
+            puhui.contains(&format!("code_point : {han:?}")),
+            "PuHui must bake CJK so Chinese titles can draw"
+        );
+        assert!(
+            puhui.contains("pixel_size : 12i16"),
+            "PuHui must bake the 12px rung"
+        );
+        assert!(
+            puhui.contains("pixel_size : 26i16"),
+            "PuHui must bake the 26px list rung"
+        );
+        let main = generated_ui();
+        assert!(
+            !main.contains(&format!("code_point : {han:?}")),
+            "main-window Latin faces must not bake Han fallbacks"
+        );
+    }
+
 
     #[test]
     fn smooth_size_packs_embed_distinct_families() {

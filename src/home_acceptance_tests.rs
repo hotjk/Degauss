@@ -601,6 +601,26 @@ pub(super) fn run(root: &Path, window: Rc<MinimalSoftwareWindow>) {
         app.trail.last().unwrap().place,
         Place::Dir(root.join("games/NES/subfolder"))
     );
+    let launched = app.position();
+    assert!(launched.home.is_some());
+    assert_eq!(launched.system, "NES");
+    app.restore_home(crate::home::Resume {
+        folder: Some(folder.clone()),
+        key: entry_key(&nested),
+        anchor: None,
+    });
+    assert!(app.open_system.is_none());
+    app.restore_position(&launched);
+    assert_eq!(app.open_system.as_deref(), Some("NES"));
+    assert_eq!(
+        app.trail.last().unwrap().place,
+        Place::Dir(root.join("games/NES/subfolder")),
+        "Frontend resume prefers the library trail over the Home screen"
+    );
+    assert!(
+        app.home.origin.is_some(),
+        "Home origin is kept so B can still return to the pin"
+    );
     app.handle(Action::Quit);
     assert_eq!(app.home.folder.as_deref(), Some(folder.as_str()));
     assert_eq!(app.selected_home_key(), Some(entry_key(&nested).as_str()));

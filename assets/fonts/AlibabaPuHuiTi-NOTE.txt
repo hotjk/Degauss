@@ -1,0 +1,9 @@
+AlibabaPuHuiTi-3-55-Regular.ttf is embedded for personal Simplified Chinese
+game-name rendering in this Degauss fork.
+
+It is registered as Appearance → Text → PuHui (settings/theme: font = "puhui")
+and baked at 12px (Slint embed seed) + 26px (list titles) in
+ui/font-packs/puhui.slint. Smooth / Pixel / Smooth 2 / Pixel 2 do not import
+this face and do not bake Han glyphs.
+
+Do not redistribute the font file. Official Alibaba PuHuiTi terms apply.

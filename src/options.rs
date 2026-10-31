@@ -464,7 +464,7 @@ impl OptionId {
                 "Scroll long names in the top title strip. Off keeps them still and shortens them to fit; game-list text is unchanged."
             }
             OptionId::Font => {
-                "Choose Smooth or Pixel text. Smooth 2 and Pixel 2 use bolder lettering."
+                "Choose Smooth or Pixel text. Smooth 2 and Pixel 2 use bolder lettering. PuHui shows Simplified Chinese names (12/26px)."
             }
             OptionId::Theme => {
                 "Left/right choose a theme. A edits colours, logo and default text."

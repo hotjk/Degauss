@@ -7347,7 +7347,7 @@ fn capture_ui_if_requested(root: &Path, window: Rc<MinimalSoftwareWindow>) {
         assert!(app.themes[app.active_theme.unwrap()].file.font.is_none());
         assert_eq!(
             app.font,
-            Font::Pixel2,
+            Font::PuHui,
             "old themes preserve the selected system font"
         );
         app.set_screen(Screen::Browse);
