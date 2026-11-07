@@ -1,6 +1,9 @@
 # Build output
 /target/
 
+# Local GitHub release packaging output (zip / binary / sha256).
+/release-dist/
+
 # Binaries staged for the card; built, not committed.
 /deploy/Scripts/.config/degauss/degauss
 
