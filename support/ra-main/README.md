@@ -66,6 +66,10 @@ sends initial controller states even before any button is pressed. This clears
 FPGA input bits retained across a Main restart, including the RA NES input-disable
 bit, while preserving player swaps and suppressing unchanged polling traffic.
 The existing protocol already sends both words after any high-bit button input.
+The `mgl-pages.patch` matches normal Degauss Main's MGL submenu handling,
+selecting the page containing an enabled file or disk slot before the existing
+transfer path runs. This includes PCXT's PCjr cartridge slots; hidden or disabled
+selectors retain the normal missing-slot handling.
 A separate `tls.patch` changes only the active HTTP transport and
 adds a real-curl host test. It removes certificate-verification bypass, requires
 HTTPS even for redirects, ignores curl startup configuration, and reports
@@ -78,6 +82,9 @@ This supports curl 7.43 or newer. Shortcut configuration at
 `config/degauss/frontend_shortcut.bin` is shared with normal Degauss Main.
 Existing 16-byte version 1 records retain the keyboard assignment with Controller
 Off; new version 2 saves preserve the keyboard and controller choices separately.
+The frontend-only controller tester and custom mappings use the same acknowledged
+Main interface as normal Degauss Main. They leave these return-shortcut records,
+native OSD mappings and game mappings unchanged.
 The controller gesture is a continuous five-second hold, with normal button input
 still sent to the game. There is no second shortcut setting.
 Frontend and either configured shortcut load `menu.rbf`;
