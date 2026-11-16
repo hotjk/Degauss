@@ -43,20 +43,22 @@ the pinned backend and validate it before shipping another Degauss release.
 
 ## Sources and compatibility
 
-- RA Main v1.15.1: commit `01351569431bb5e8c386658932a1d4796fd96812`
-  from https://github.com/odelot/Main_MiSTer/tree/01351569431bb5e8c386658932a1d4796fd96812.
+- RA Main v1.16.0: commit `69f1249065f1ff3d04f5f9242355a1d5475170fe`
+  from https://github.com/odelot/Main_MiSTer/tree/69f1249065f1ff3d04f5f9242355a1d5475170fe.
 - Source archive SHA-256:
-  `0705439c963518d56e2adb5d3e38c64151b8ff77940d66e8768d1b3ae54b63e2`.
+  `81b7bf0289bb3d7aefe478a2209bea073881dac7d3d859e610ede47ddfaf5ffe`.
 - Degauss integration base: commit `809893ddb8e3f7f40797579e0ed8178b03d558f8`
   from https://github.com/giancarloerra/Degauss-Main.
   The patch omits its unrelated input.cpp blank-line removal.
   Native analog output also keeps its current-clock Y/C calculation instead of
   applying ordinary Menu's clock-specific overrides. The build records the
   complete frontend patch checksum alongside the base revision.
+- Debug logging retains upstream's single-open guard and closes the log handle
+  when Main executes its replacement, preventing handle accumulation on reload.
 - rcheevos 12.5.0 is already bundled in this exact RA source. Its bytes remain
   unchanged; the build fails if the dependency or its compiled object is missing.
-- Mozilla CA bundle from https://curl.se/ca/cacert-2026-08-13.pem (MPL-2.0),
-  SHA-256 `f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9`.
+- Mozilla CA bundle from https://curl.se/ca/cacert-2026-11-05.pem (MPL-2.0),
+  SHA-256 `427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285`.
   Its published checksum is available at the same URL with `.sha256` appended.
 
 The patch adds the same helper implementation, input hook, menu actions, and
@@ -69,7 +71,10 @@ The existing protocol already sends both words after any high-bit button input.
 The `mgl-pages.patch` matches normal Degauss Main's MGL submenu handling,
 selecting the page containing an enabled file or disk slot before the existing
 transfer path runs. This includes PCXT's PCjr cartridge slots; hidden or disabled
-selectors retain the normal missing-slot handling.
+selectors follow normal Main's handling. A visible but disabled match is
+skipped. Existing SNES and NES launchers that target the first loader with
+a different slot number continue to work without edits or a library rebuild.
+The first row must accept the requested media type.
 A separate `tls.patch` changes only the active HTTP transport and
 adds a real-curl host test. It removes certificate-verification bypass, requires
 HTTPS even for redirects, ignores curl startup configuration, and reports

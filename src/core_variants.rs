@@ -20,13 +20,16 @@ struct Element {
     range: Range<usize>,
     inner: Range<usize>,
     value: String,
+    follows_acorn_build: bool,
 }
+
+const FOLLOW_ACORN_BUILD: &str = "degauss-follow-core";
 
 fn elements(text: &str, path: &Path) -> Result<(Element, Option<Element>)> {
     let mut reader = Reader::from_str(text);
     let mut depth = 0usize;
     let mut root_seen = false;
-    let mut active: Option<(bool, usize, usize)> = None;
+    let mut active: Option<(bool, usize, usize, bool)> = None;
     let mut rbf = None;
     let mut setname = None;
     let bad = |message: &str| DegaussError::malformed("core launcher", path, message.to_string());
@@ -54,13 +57,19 @@ fn elements(text: &str, path: &Path) -> Result<(Element, Option<Element>)> {
                     if depth != 1 {
                         return Err(bad("core and setname must be root children"));
                     }
-                    for a in e.attributes() {
-                        a.map_err(|e| bad(&e.to_string()))?;
+                    let is_rbf = e.name().as_ref().eq_ignore_ascii_case("rbf");
+                    let mut follows_acorn_build = false;
+                    for attribute in e.attributes() {
+                        let attribute = attribute.map_err(|e| bad(&e.to_string()))?;
+                        if is_rbf && attribute.key.as_ref() == FOLLOW_ACORN_BUILD {
+                            follows_acorn_build = attribute.value.as_ref() == "1";
+                        }
                     }
                     active = Some((
-                        e.name().as_ref().eq_ignore_ascii_case("rbf"),
+                        is_rbf,
                         start,
                         reader.buffer_position() as usize,
+                        follows_acorn_build,
                     ));
                 }
                 depth += 1;
@@ -69,7 +78,7 @@ fn elements(text: &str, path: &Path) -> Result<(Element, Option<Element>)> {
                 depth = depth
                     .checked_sub(1)
                     .ok_or_else(|| bad("unexpected closing element"))?;
-                if let Some((is_rbf, begin, inner)) = active.take() {
+                if let Some((is_rbf, begin, inner, follows_acorn_build)) = active.take() {
                     let value = quick_xml::escape::unescape(text[inner..start].trim())
                         .map_err(|e| bad(&e.to_string()))?
                         .into_owned();
@@ -84,6 +93,7 @@ fn elements(text: &str, path: &Path) -> Result<(Element, Option<Element>)> {
                         range: begin..reader.buffer_position() as usize,
                         inner: inner..start,
                         value,
+                        follows_acorn_build,
                     });
                 }
             }
@@ -165,6 +175,27 @@ pub(crate) fn same_core_identity(left: &str, right: &str) -> bool {
             .collect::<String>()
     };
     normalize(left) == normalize(right)
+}
+
+const ACORN_MEDIA_CORES: [(&str, &str); 2] = [
+    ("AcornAtom", "AcornAtom_DualSDRAM"),
+    ("AcornElectron", "AcornElectron_DualSDRAM"),
+];
+
+/// An undated Acorn reference must resolve to the installed build before
+/// checking media support. A user-pinned dated reference stays fixed.
+pub(crate) fn undated_acorn_media_core(stem: &str) -> bool {
+    ACORN_MEDIA_CORES.iter().any(|(standard, dual)| {
+        stem.eq_ignore_ascii_case(standard) || stem.eq_ignore_ascii_case(dual)
+    })
+}
+
+fn acorn_media_family(stem: &str) -> Option<&'static str> {
+    ACORN_MEDIA_CORES.into_iter().find_map(|(standard, dual)| {
+        (crate::core_choices::nightly_matches(stem, standard)
+            || crate::core_choices::nightly_matches(stem, dual))
+        .then_some(standard)
+    })
 }
 
 pub(crate) fn core_present(root: &Path, rbf: &str) -> Result<bool> {
@@ -384,34 +415,46 @@ fn preserve_setname_attributes(old: &str, new: &str, path: &Path) -> Result<Stri
     Ok(result)
 }
 
-/// The 20261015 Sharp MZ build removed F1. Adapt only the MZF direct-load
-/// action of generated/recognised favourites; explicit tape and disk slots stay.
-fn sharp_mz_mzf_patches(
+/// Adapt verified variant-specific ROM slots and the legacy Atom VHD slot.
+/// Explicit secondary drives and all unrelated file actions stay untouched.
+fn core_file_slot_patches(
     text: &str,
     path: &Path,
     core: &EffectiveCore,
+    source_rbf: &str,
 ) -> Result<Vec<(Range<usize>, String)>> {
     let stem = Path::new(&core.rbf)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    if !same_core_identity(stem, "SharpMZ")
-        && !crate::core_choices::nightly_matches(stem, "_Computer/SharpMZ")
-    {
-        return Ok(Vec::new());
-    }
-    let lower = stem.to_ascii_lowercase();
-    let date = crate::systems::core_build_date(stem).or_else(|| {
-        lower
-            .rfind("_unstable_")
-            .and_then(|at| stem.get(at + 10..at + 18))
-    });
-    let wanted = if date.is_some_and(|date| date >= "20261015") {
-        "2"
-    } else {
-        // Undated custom builds retain the original direct-load profile.
-        "1"
-    };
+    let (kind, from, wanted, extensions): (&str, &str, &str, &[&str]) =
+        if core.rbf.eq_ignore_ascii_case("_RA_Cores/Cores/NES") {
+            ("f", "1", "0", &["nes", "fds", "nsf"])
+        } else if source_rbf.eq_ignore_ascii_case("_RA_Cores/Cores/NES")
+            && (same_core_identity(stem, "NES")
+                || crate::core_choices::nightly_matches(stem, "_Console/NES"))
+        {
+            ("f", "0", "1", &["nes", "fds", "nsf"])
+        } else if same_core_identity(stem, "SharpMZ")
+            || crate::core_choices::nightly_matches(stem, "_Computer/SharpMZ")
+        {
+            let lower = stem.to_ascii_lowercase();
+            let date = crate::systems::core_build_date(stem).or_else(|| {
+                lower
+                    .rfind("_unstable_")
+                    .and_then(|at| stem.get(at + 10..at + 18))
+            });
+            if date.is_some_and(|date| date >= "20261015") {
+                ("f", "1", "2", &["mzf"])
+            } else {
+                // Undated custom builds retain the original direct-load profile.
+                ("f", "2", "1", &["mzf"])
+            }
+        } else if acorn_media_family(stem) == Some("AcornAtom") {
+            ("s", "1", "0", &["vhd"])
+        } else {
+            return Ok(Vec::new());
+        };
     let mut reader = Reader::from_str(text);
     let mut patches = Vec::new();
     let mut depth = 0usize;
@@ -435,7 +478,7 @@ fn sharp_mz_mzf_patches(
                         .iter()
                         .find(|attribute| attribute.key.as_ref().eq_ignore_ascii_case(key))
                 };
-                let is_mzf = get("path")
+                let matches_media = get("path")
                     .map(|attribute| {
                         crate::favorites::main_path_value(attribute, path, "core launcher")
                     })
@@ -443,13 +486,18 @@ fn sharp_mz_mzf_patches(
                     .is_some_and(|value| {
                         Path::new(value.as_str())
                             .extension()
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("mzf"))
+                            .is_some_and(|extension| {
+                                extensions
+                                    .iter()
+                                    .any(|expected| extension.eq_ignore_ascii_case(expected))
+                            })
                     });
-                if is_mzf && get("type").is_some_and(|attribute| attribute.value.as_ref() == "f") {
-                    if let Some(index) = get("index").filter(|attribute| {
-                        matches!(attribute.value.as_ref(), "1" | "2")
-                            && attribute.value.as_ref() != wanted
-                    }) {
+                if matches_media
+                    && get("type").is_some_and(|attribute| attribute.value.as_ref() == kind)
+                {
+                    if let Some(index) =
+                        get("index").filter(|attribute| attribute.value.as_ref() == from)
+                    {
                         let start = index.value.as_ptr() as usize - text.as_ptr() as usize;
                         patches.push((start..start + index.value.len(), wanted.into()));
                     }
@@ -466,7 +514,7 @@ fn sharp_mz_mzf_patches(
     Ok(patches)
 }
 
-/// Replace the selected core/setname and its build-specific MZF load slot;
+/// Replace the selected core/setname and its variant-specific media slots;
 /// all unrelated XML remains byte-for-byte.
 pub fn apply(text: &str, path: &Path, core: &EffectiveCore) -> Result<String> {
     apply_with_reference(text, path, core, &core.rbf)
@@ -480,6 +528,7 @@ pub(crate) fn apply_with_reference(
     core: &EffectiveCore,
     reference: &str,
 ) -> Result<String> {
+    check_media_build(text, path, core)?;
     let (rbf, setname) = elements(text, path)?;
     let mut patches = vec![(
         rbf.inner.clone(),
@@ -496,13 +545,24 @@ pub(crate) fn apply_with_reference(
         (None, Some(new)) => patches.push((rbf.range.end..rbf.range.end, format!("\n\t{new}"))),
         _ => {}
     }
-    patches.extend(sharp_mz_mzf_patches(text, path, core)?);
+    patches.extend(core_file_slot_patches(text, path, core, &rbf.value)?);
     patches.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
     let mut result = text.to_owned();
     for (range, replacement) in patches {
         result.replace_range(range, &replacement);
     }
     Ok(result)
+}
+
+/// Main ignores this optional attribute. Degauss uses it only on generated
+/// Acorn favourites that must name an exact file to avoid a native collision.
+pub(crate) fn follow_acorn_build(text: &mut String, path: &Path) -> Result<()> {
+    let (rbf, _) = elements(text, path)?;
+    text.insert_str(
+        rbf.inner.start - 1,
+        &format!(r#" {FOLLOW_ACORN_BUILD}="1""#),
+    );
+    Ok(())
 }
 
 /// Only known standard/RA references are eligible for conversion. Custom MGLs
@@ -530,11 +590,11 @@ fn recognized_family(
     system: &SystemConfig,
     game: Option<&Path>,
 ) -> bool {
-    let base = Path::new(&system.rbf)
+    let configured_stem = Path::new(&system.rbf)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    let base = crate::systems::undated_core_stem(base);
+    let base = crate::systems::undated_core_stem(configured_stem);
     let identity = base;
     let rule_match = game
         .and_then(|game| system.rule_for(game))
@@ -550,7 +610,18 @@ fn recognized_family(
                 .unwrap_or("");
             same_core_identity(configured, actual)
         });
+    let generated_dated_acorn = rbf.follows_acorn_build
+        && undated_acorn_media_core(configured_stem)
+        && Path::new(&rbf.value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|actual| {
+                crate::systems::core_build_date(actual).is_some()
+                    && crate::systems::undated_core_stem(actual).eq_ignore_ascii_case(base)
+            })
+        && Path::new(&rbf.value).parent() == Path::new(&system.rbf).parent();
     let standard_match = (rbf.value.eq_ignore_ascii_case(&system.rbf)
+        || generated_dated_acorn
         || rule_match
         || crate::core_choices::is_unstable_reference(system, &rbf.value))
         && match (
@@ -571,16 +642,107 @@ fn recognized_family(
 /// Avoid generating a temporary shortcut when its effective core is unchanged.
 pub fn needs_conversion(path: &Path, core: &EffectiveCore) -> Result<bool> {
     let text = read_launcher(path)?;
+    check_media_build(&text, path, core)?;
     let (rbf, setname) = elements(&text, path)?;
     if !rbf.value.eq_ignore_ascii_case(&core.rbf) {
         return Ok(true);
     }
-    Ok(!sharp_mz_mzf_patches(&text, path, core)?.is_empty()
-        || match (setname, &core.setname_xml) {
-            (None, None) => false,
-            (Some(old), Some(new)) => text[old.range] != *new,
-            _ => true,
-        })
+    Ok(
+        !core_file_slot_patches(&text, path, core, &rbf.value)?.is_empty()
+            || match (setname, &core.setname_xml) {
+                (None, None) => false,
+                (Some(old), Some(new)) => text[old.range] != *new,
+                _ => true,
+            },
+    )
+}
+
+/// Check the selected build only for media added after a core's first release.
+/// The same check applies to direct launches and persistent favourites.
+fn check_media_build(text: &str, path: &Path, core: &EffectiveCore) -> Result<()> {
+    let stem = Path::new(&core.rbf)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let (name, requirements): (&str, &[(&str, &[&str])]) = if same_core_identity(stem, "TK2000")
+        || crate::core_choices::nightly_matches(stem, "_Computer/TK2000")
+    {
+        ("TK2000", &[("20261107", &["ct2"])])
+    } else {
+        match acorn_media_family(stem) {
+            Some("AcornAtom") => ("Acorn Atom", &[("20261111", &["uef", "csw"])]),
+            Some("AcornElectron") => (
+                "Acorn Electron",
+                &[
+                    ("20220211", &["uef"]),
+                    ("20261111", &["cas", "rom", "adf", "adl"]),
+                ],
+            ),
+            _ => return Ok(()),
+        }
+    };
+    let too_old = |minimum| !crate::core_choices::nightly_meets_minimum(stem, Some(minimum));
+    if !requirements.iter().any(|&(minimum, _)| too_old(minimum)) {
+        return Ok(());
+    }
+    let mut reader = Reader::from_str(text);
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| DegaussError::malformed("core launcher", path, e.to_string()))?
+        {
+            Event::Start(tag) | Event::Empty(tag)
+                if tag.name().as_ref().eq_ignore_ascii_case("file") =>
+            {
+                let mut file = None;
+                let mut file_transfer = false;
+                let mut cartridge_slot = false;
+                for attr in tag.attributes() {
+                    let attr = attr.map_err(|e| {
+                        DegaussError::malformed("core launcher", path, e.to_string())
+                    })?;
+                    let key = attr.key.as_ref();
+                    if key.eq_ignore_ascii_case("path") {
+                        file = Some(attr);
+                    } else if key.eq_ignore_ascii_case("type") {
+                        file_transfer = attr.value.eq_ignore_ascii_case("f");
+                    } else if key.eq_ignore_ascii_case("index") {
+                        cartridge_slot = attr
+                            .value
+                            .trim()
+                            .parse::<u8>()
+                            .ok()
+                            .is_some_and(|index| matches!(index, 3 | 4));
+                    }
+                }
+                let Some(file) = file else { continue };
+                let value = crate::favorites::main_path_value(&file, path, "core launcher")?;
+                let Some(extension) = Path::new(&value).extension().and_then(|ext| ext.to_str())
+                else {
+                    continue;
+                };
+                // Electron's .rom rule is for Plus 1 cartridges, not F0
+                // firmware in an explicit launcher for an older build.
+                if extension.eq_ignore_ascii_case("rom") && !(file_transfer && cartridge_slot) {
+                    continue;
+                }
+                for &(minimum, extensions) in requirements {
+                    if too_old(minimum)
+                        && extensions
+                            .iter()
+                            .any(|ext| ext.eq_ignore_ascii_case(extension))
+                    {
+                        return Err(DegaussError::unsupported(
+                            "core media",
+                            format!(".{extension} requires a dated {name} build from {minimum} or later. Update the core."),
+                        ));
+                    }
+                }
+            }
+            Event::Eof => return Ok(()),
+            _ => {}
+        }
+    }
 }
 
 pub fn convert_favorite(path: &Path, core: &EffectiveCore) -> Result<String> {
@@ -658,7 +820,7 @@ mod tests {
                 rbf: None,
                 delay: 1,
                 kind: "f".into(),
-                index: 0,
+                index: 1,
                 companion_extensions: vec![],
                 companion_index: None,
                 reset_delay: None,
@@ -671,6 +833,133 @@ mod tests {
         std::fs::write(root.join("_RA_Cores/Cores/NES.rbf"), b"test discovery only").unwrap();
         std::fs::write(root.join("_RA_Cores/NES.mgl"), "<mistergamedescription><rbf>_RA_Cores/Cores/NES</rbf><setname same_dir=\"1\">RA_NES</setname></mistergamedescription>").unwrap();
     }
+
+    #[test]
+    fn shipped_nes_media_use_the_selected_variants_rom_slot_without_rewriting_favourites() {
+        let (root, _) = setup("nes-media-slots");
+        install_ra(&root);
+        std::fs::write(root.join("_Console/NES.rbf"), b"discovery fixture").unwrap();
+        std::fs::create_dir_all(root.join("_Unstable")).unwrap();
+        let nightly = "_Unstable/NES_unstable_20260810_137d52.rbf";
+        std::fs::write(root.join(nightly), b"discovery fixture").unwrap();
+        let variants = [("standard", "1"), ("ra", "0"), (nightly, "1")];
+
+        // These are the real shipped profiles, not a synthetic NES slot-0 rule.
+        // NES RA's observed FS,NESFDSNSF selector handles all three extensions.
+        for (id, extension) in [("NES", "nes"), ("FDS", "fds"), ("NESMusic", "nsf")] {
+            let def = crate::systems::load_table(Path::new("assets/systems.toml"))
+                .unwrap()
+                .into_iter()
+                .find(|system| system.id == id)
+                .unwrap();
+            let system = crate::systems::FoundSystem {
+                def,
+                paths: vec![root.join("games/NES")],
+                logo_dir: None,
+                menu_folder: None,
+            }
+            .to_config();
+            let game = root.join(format!("games/NES/Game.{extension}"));
+            std::fs::write(&game, b"path fixture").unwrap();
+            assert_eq!(system.rule_for(&game).unwrap().index, 1);
+
+            for (source_number, (version, index)) in variants.iter().enumerate() {
+                let plan = crate::launch::plan_with_choice(
+                    &system,
+                    &game,
+                    &root.join("launch.mgl"),
+                    &root,
+                    false,
+                    Some(version),
+                )
+                .unwrap();
+                let selector = format!("type=\"f\" index=\"{index}\"");
+                assert!(plan.mgl.contains(&selector), "{id}/{version}: {}", plan.mgl);
+                let favourite = crate::launch::favorite_mgl_with_choice(
+                    &system,
+                    &game,
+                    &root,
+                    false,
+                    Some(version),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(favourite.contains(&selector));
+                let path = root.join(format!("{id}-{source_number}.mgl"));
+                std::fs::write(&path, &favourite).unwrap();
+                for (target, target_index) in variants {
+                    let converted = crate::launch::plan_with_choice(
+                        &system,
+                        &path,
+                        &root.join("converted.mgl"),
+                        &root,
+                        false,
+                        Some(target),
+                    )
+                    .unwrap();
+                    let actual = if converted.mgl.is_empty() {
+                        &favourite
+                    } else {
+                        &converted.mgl
+                    };
+                    assert!(
+                        actual.contains(&format!("type=\"f\" index=\"{target_index}\"")),
+                        "{id}/{version} -> {target}: {actual}"
+                    );
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), favourite);
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_nes_ra_favourites_repair_the_old_slot_even_without_a_core_change() {
+        let (root, system) = setup("old-nes-ra-slot");
+        install_ra(&root);
+        let core = resolve(&system, &root, true).unwrap();
+        let original = "<mistergamedescription><rbf>_RA_Cores/Cores/NES</rbf><setname same_dir=\"1\">RA_NES</setname><!-- keep --><file delay='2' type='f' index='1' path='Game &amp; One.NES' custom='keep'/><reset delay='3' hold='4'/></mistergamedescription>";
+        let path = root.join("Old.mgl");
+        std::fs::write(&path, original).unwrap();
+        assert!(needs_conversion(&path, &core).unwrap());
+        let repaired = convert_favorite(&path, &core).unwrap();
+        assert_eq!(repaired, original.replace("index='1'", "index='0'"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(apply(&repaired, &path, &core).unwrap(), repaired);
+        let valid = root.join("Valid.mgl");
+        std::fs::write(&valid, &repaired).unwrap();
+        assert!(!needs_conversion(&valid, &core).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nes_ra_slot_conversion_preserves_explicit_other_actions_and_standard_profiles() {
+        let (root, system) = setup("nes-slot-boundary");
+        install_ra(&root);
+        let core = resolve(&system, &root, true).unwrap();
+        let text = "<mistergamedescription><rbf>_Console/NES</rbf><file type='f' index='1' path='Game.nes'/><file type='f' index='2' path='Other.nes'/><file type='s' index='1' path='Disk.fds'/><file type='f' index='1' path='Other.bin'/><reset delay='3' hold='4'/></mistergamedescription>";
+        let changed = apply(text, Path::new("Game.mgl"), &core).unwrap();
+        assert!(changed.contains("type='f' index='0' path='Game.nes'"));
+        let unchanged_actions = "<file type='f' index='2' path='Other.nes'/><file type='s' index='1' path='Disk.fds'/><file type='f' index='1' path='Other.bin'/><reset delay='3' hold='4'/>";
+        assert!(changed.contains(unchanged_actions));
+        let standard = super::standard(&system);
+        assert_eq!(apply(text, Path::new("Game.mgl"), &standard).unwrap(), text);
+        let custom = text.replace("index='1' path='Game.nes'", "index='0' path='Game.nes'");
+        assert_eq!(
+            apply(&custom, Path::new("Game.mgl"), &standard).unwrap(),
+            custom,
+            "An existing Standard/custom selector is not an RA-to-Standard conversion"
+        );
+        let other_core = EffectiveCore {
+            rbf: "_RA_Cores/Cores/SNES".into(),
+            setname_xml: None,
+        };
+        assert!(apply(text, Path::new("Game.mgl"), &other_core)
+            .unwrap()
+            .contains("type='f' index='1' path='Game.nes'"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn preference_and_missing_variant_matrix() {
         let (root, system) = setup("matrix");
@@ -931,6 +1220,27 @@ extensions = ["nes", "mgl"]
             "<mistergamedescription><rbf>x</rbf>",
         ] {
             assert!(elements(text, path).is_err());
+        }
+    }
+
+    #[test]
+    fn tk2000_tape_date_recognises_the_same_case_insensitive_nightlies_as_core_selection() {
+        let tape = "<mistergamedescription><file type=\"f\" index=\"2\" path=\"Game.CT2\"/></mistergamedescription>";
+        let disk = "<mistergamedescription><file type=\"s\" index=\"0\" path=\"Disk.dsk\"/></mistergamedescription>";
+        for marker in ["unstable", "UNSTABLE", "Unstable"] {
+            for date in ["20261106", "20261107", "20261108"] {
+                let core = EffectiveCore {
+                    rbf: format!("_Unstable/TK2000_{marker}_{date}_abcdef"),
+                    setname_xml: None,
+                };
+                assert_eq!(
+                    check_media_build(tape, Path::new("tape.mgl"), &core).is_ok(),
+                    date >= "20261107",
+                    "{}",
+                    core.rbf
+                );
+                assert!(check_media_build(disk, Path::new("disk.mgl"), &core).is_ok());
+            }
         }
     }
 }

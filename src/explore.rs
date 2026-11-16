@@ -14,12 +14,22 @@ use crate::game_filter::{Criterion, Field};
 pub const NAME: &str = "Explore Games";
 pub const STATE_ID: &str = "__degauss_explore__";
 
+/// The collection and its original criteria at one level of Explore navigation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionEdit {
+    pub depth: usize,
+    pub id: String,
+    pub original_query: Query,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resume {
     pub query: Query,
     pub origin: Option<Box<crate::state::State>>,
     #[serde(default)]
     pub pivots: Vec<(Query, usize)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collection_edits: Vec<CollectionEdit>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,62 +427,61 @@ pub struct Request {
 impl Request {
     /// Cache revisions and selected-source/visibility changes invalidate only
     /// affected systems. This does not enumerate or read game directories.
-    fn source_signatures(&self, cancelled: &AtomicBool) -> BTreeMap<String, String> {
+    pub(crate) fn source_signatures(&self, cancelled: &AtomicBool) -> BTreeMap<String, String> {
         self.sources
             .iter()
             .take_while(|_| !cancelled.load(Ordering::Relaxed))
-            .map(|source| {
-                let mut paths = vec![crate::cache::system_path(&self.cache_dir, &source.id)];
-                if source.pack.is_some() {
-                    paths = vec![
-                        crate::cache::artwork_pack_system_path(&self.cache_dir, &source.id),
-                        crate::cache::artwork_pack_source_path(&self.cache_dir, &source.id),
-                        crate::cache::artwork_pack_prepared_path(&self.cache_dir, &source.id),
-                    ];
-                }
-                let stamps: Vec<_> = paths
-                    .iter()
-                    .map(|path| {
-                        std::fs::metadata(path)
-                            .map(|data| (data.len(), data.modified().ok()))
-                            .map_err(|error| error.kind())
-                    })
-                    .collect();
-                let roots: Vec<_> = std::iter::once(&source.config.path)
-                    .chain(source.config.extra_paths.iter())
-                    .collect();
-                let mut hidden: Vec<_> = self
-                    .hidden
-                    .iter()
-                    .filter(|key| {
-                        let Some((_, value)) = key.split_once(':') else {
-                            return false;
-                        };
-                        let path = std::path::Path::new(value.split('|').next().unwrap_or(value));
-                        roots.iter().any(|root| path.starts_with(root))
-                    })
-                    .collect();
-                hidden.sort();
-                let available = roots.iter().any(|root| std::path::Path::new(root).is_dir());
-                (
-                    source.id.clone(),
-                    format!(
-                        "{:?}",
-                        (
-                            &source.name,
-                            &source.category,
-                            &source.pack,
-                            &source.error,
-                            &self.language,
-                            roots,
-                            hidden,
-                            stamps,
-                            available
-                        )
-                    ),
-                )
-            })
+            .map(|source| (source.id.clone(), self.source_signature(source)))
             .collect()
+    }
+
+    pub(crate) fn source_signature(&self, source: &Source) -> String {
+        let mut paths = vec![crate::cache::system_path(&self.cache_dir, &source.id)];
+        if source.pack.is_some() {
+            paths = vec![
+                crate::cache::artwork_pack_system_path(&self.cache_dir, &source.id),
+                crate::cache::artwork_pack_source_path(&self.cache_dir, &source.id),
+                crate::cache::artwork_pack_prepared_path(&self.cache_dir, &source.id),
+            ];
+        }
+        let stamps: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                std::fs::metadata(path)
+                    .map(|data| (data.len(), data.modified().ok()))
+                    .map_err(|error| error.kind())
+            })
+            .collect();
+        let roots: Vec<_> = std::iter::once(&source.config.path)
+            .chain(source.config.extra_paths.iter())
+            .collect();
+        let mut hidden: Vec<_> = self
+            .hidden
+            .iter()
+            .filter(|key| {
+                let Some((_, value)) = key.split_once(':') else {
+                    return false;
+                };
+                let path = std::path::Path::new(value.split('|').next().unwrap_or(value));
+                roots.iter().any(|root| path.starts_with(root))
+            })
+            .collect();
+        hidden.sort();
+        let available = roots.iter().any(|root| std::path::Path::new(root).is_dir());
+        format!(
+            "{:?}",
+            (
+                &source.name,
+                &source.category,
+                &source.pack,
+                &source.error,
+                &self.language,
+                roots,
+                hidden,
+                stamps,
+                available
+            )
+        )
     }
 }
 
@@ -547,7 +556,7 @@ fn hidden_key(row: &Row) -> String {
     }
 }
 
-fn read_source(
+pub(crate) fn read_source(
     request: &Request,
     source: &Source,
 ) -> Result<(
@@ -702,7 +711,7 @@ fn deduplicate(
     Ok(Some(games))
 }
 
-fn load(
+pub(crate) fn load(
     mut request: Request,
     cancelled: &AtomicBool,
     mut progress: impl FnMut(String),
@@ -1474,6 +1483,7 @@ mod tests {
             query: query.clone(),
             origin: None,
             pivots: vec![(query.clone(), 17)],
+            collection_edits: Vec::new(),
         };
         let text = toml::to_string(&resume).unwrap();
         let saved: Resume = toml::from_str(&text).unwrap();

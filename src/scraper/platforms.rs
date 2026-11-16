@@ -78,6 +78,9 @@ fn built_in(system: &str) -> Option<u32> {
         "SordM5" => 323,
         "MacPlus" | "MacLC" => 146,
         "MyVision" => 305,
+        // These indexed libraries have no reviewed ScreenScraper platform.
+        // An explicit user override still takes priority.
+        "MTX512" | "PC6001" => return None,
         "Odyssey2" => 104,
         "MasterSystem" => 2,
         "MegaDuck" => 90,
@@ -213,6 +216,7 @@ mod tests {
             .map(|system| system.id.as_str())
             .collect();
         let expected: BTreeSet<_> = [
+            "3B1",
             "AmstradPCW",
             "Altair8800",
             "Apogee",
@@ -242,6 +246,7 @@ mod tests {
             "Laser",
             "MACIICX",
             "MACSE30",
+            "MTX512",
             "MacQuadra800",
             "Marty",
             "MultiComp",
@@ -250,6 +255,7 @@ mod tests {
             "Neon",
             "Orao",
             "OtherCores",
+            "PC6001",
             "PCXT",
             "PCjr",
             "PDP1",

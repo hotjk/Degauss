@@ -53,6 +53,10 @@ include!("home_app.rs");
 include!("custom_view_app.rs");
 include!("folder_options_app.rs");
 include!("controller_app.rs");
+include!("web_app.rs");
+include!("web_edit_app.rs");
+include!("web_data_app.rs");
+include!("web_organize_app.rs");
 use crate::metrics::{FrameTimer, StartupTimings};
 use crate::name_display::GameNameDisplay;
 use crate::name_keyboard::{self, Key as NameKey, Page as NamePage};
@@ -309,6 +313,7 @@ impl OptionInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptionOperation {
     None,
+    WebAccess(OptionId),
     OpenControllers,
     Adjust(isize),
     OpenThemeEditor,
@@ -327,6 +332,14 @@ enum OptionOperation {
 /// instead of silently inheriting left/right adjustment.
 fn option_operation(option: OptionId, input: OptionInput) -> OptionOperation {
     match option {
+        OptionId::WebPort
+        | OptionId::WebPassword
+        | OptionId::WebAddress
+        | OptionId::WebCertificate => match input {
+            OptionInput::Activate => OptionOperation::WebAccess(option),
+            _ => OptionOperation::None,
+        },
+        OptionId::WebMode | OptionId::WebCrtImages => OptionOperation::Adjust(input.delta()),
         OptionId::Spacer => OptionOperation::None,
         OptionId::Controllers => match input {
             OptionInput::Activate => OptionOperation::OpenControllers,
@@ -681,7 +694,7 @@ pub(crate) fn owner_of_favorite(
 /// favourites tree. The favourite itself carries no presentation data, so its
 /// live target and owning system decide which independent cache/provider is
 /// allowed to supply it.
-fn enrich_favorite_rows(
+pub(crate) fn enrich_favorite_rows(
     rows: &mut [browse::Row],
     systems: &[FoundSystem],
     homes: &crate::mgl::Homes,
@@ -2247,6 +2260,7 @@ fn context_help(action: &str) -> &'static str {
         FILTER_GAMES => "Filter games in this folder by their available metadata.",
         FILTER_RELEASES => "Filter Core Updates by type and source.",
         CLEAR_FILTERS => "Clear metadata filters while keeping any title search.",
+        UPDATE_COLLECTION => "Save this search and its filters to the open collection.",
         HIDE_THIS => "Hide the selected item from browsing without deleting it.",
         SHOW_THIS => "Remove this item's hidden setting so it is normally visible again.",
         SCRAPE_SYSTEM => "Open scraping settings for the entire selected system.",
@@ -3023,6 +3037,8 @@ enum FindMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NamePurpose {
+    WebPassword,
+    WebPort,
     UnlockKiosk,
     SaveView,
     RenameView(String),
@@ -3221,7 +3237,7 @@ fn up_level_row() -> browse::Row {
 /// A folder by where it points and a game by what it launches, so the two
 /// cannot collide and neither depends on what the row is called: renaming
 /// a game in a gamelist must not unhide it.
-fn row_key(row: &browse::Row) -> String {
+pub(crate) fn row_key(row: &browse::Row) -> String {
     match &row.kind {
         browse::Kind::Up => "up:".to_string(),
         browse::Kind::Enter(place) => place.key(),
@@ -3256,7 +3272,7 @@ fn sort_rows_for_display(rows: &mut [browse::Row], mode: GameNameDisplay, mra_fi
 }
 
 /// Apply the existing folder and favourite groups to an already ordered list.
-fn group_rows(rows: &mut [browse::Row], folders_last: bool, favorites_first: bool) {
+pub(crate) fn group_rows(rows: &mut [browse::Row], folders_last: bool, favorites_first: bool) {
     // Stable, so visible alphabetical order survives inside each group.
     rows.sort_by_key(|row| {
         let folder = if folders_last {
@@ -3448,7 +3464,7 @@ fn seed_from_clock() -> u64 {
 
 /// xorshift64*. Small, no dependency, and far better than good enough for
 /// picking a game: nothing here is cryptography.
-fn next_random(seed: &mut u64) -> u64 {
+pub(crate) fn next_random(seed: &mut u64) -> u64 {
     let mut x = *seed;
     x ^= x >> 12;
     x ^= x << 25;
@@ -4077,6 +4093,7 @@ impl CoreUpdateGames {
 }
 
 pub struct App {
+    web: WebAccess,
     controllers: ControllerBrowser,
     kiosk_locked: bool,
     explore: ExploreBrowser,
@@ -4147,7 +4164,7 @@ pub struct App {
     context_view_changed: bool,
     options_page: OptionsPage,
     options_root_list: ListState,
-    option_lists: [ListState; 6],
+    option_lists: [ListState; 7],
     advanced_list: ListState,
     ini_profiles: Vec<crate::ini_profile::Profile>,
     ini_current: Option<u8>,
@@ -4833,6 +4850,7 @@ impl App {
         let kiosk_locked = config.kiosk_pin.is_some();
         let start_folder_pending = settings.start_folder.is_some() && !kiosk_locked;
         let mut app = App {
+            web: WebAccess::default(),
             kiosk_locked,
             explore: ExploreBrowser::default(),
             speed: settings
@@ -8727,7 +8745,8 @@ impl App {
     }
 
     fn start_provider_job_if_ready(&mut self) {
-        if self.provider_job.is_some()
+        if self.web_writing()
+            || self.provider_job.is_some()
             || self.provider_requests.is_empty()
             || self.build.is_some()
             || self.source_job.is_some()
@@ -9789,7 +9808,11 @@ impl App {
     /// Where browsing currently is, for the title bar.
     fn here_label(&self) -> String {
         if self.explore.active {
-            return crate::explore::NAME.to_string();
+            return self
+                .explore_collection_edit()
+                .and_then(|edit| self.settings.collections.get(&edit.id))
+                .map(|collection| collection.name.clone())
+                .unwrap_or_else(|| crate::explore::NAME.to_string());
         }
         if self.in_misterzine_browser() {
             return MISTERZINE_CATEGORY.to_string();
@@ -10049,42 +10072,14 @@ impl App {
             self.opened_config.clone()?
         };
         if self.in_favorites() {
-            if let browse::Launch::File(path) = &game {
-                if let Some(reference) = crate::favorites::reference_of(path, &self.homes()) {
-                    // Two files of the favourite's name in two of its
-                    // system's folders: MiSTer would start one of them by
-                    // its own order, and which one is exactly what nobody
-                    // can tell from here. Said on screen instead.
-                    if let Some(crate::mgl::Diagnostic::Ambiguous(text)) = &reference.diagnostic {
-                        self.message = Some(text.clone());
-                        self.dirty = true;
-                        return None;
-                    }
-                    if let Some(id) = owner_of_favorite(&self.all_systems, &reference) {
-                        if let Some(owner) =
-                            self.all_systems.iter().find(|system| system.def.id == id)
-                        {
-                            config = owner.to_config();
-                            history_system = Some(id);
-                        }
-                    }
-                    history_launch = match crate::launch::amiga_marker(path) {
-                        Some((install, title)) => browse::Launch::AmigaVision { install, title },
-                        None => browse::Launch::File(reference.cache_target.clone()),
-                    };
-                    override_launch = match crate::launch::amiga_marker(path) {
-                        Some((install, title)) => browse::Launch::AmigaVision { install, title },
-                        None => browse::Launch::File(reference.owner_target.clone()),
-                    };
-                    if crate::zip::split_member_path(&reference.owner_target).is_some() {
-                        if let Err(error) =
-                            crate::zip::validate_member_for_launch(&reference.owner_target)
-                        {
-                            self.message = Some(error.to_string());
-                            self.dirty = true;
-                            return None;
-                        }
-                    }
+            match self.favorite_launch_context(&game, config) {
+                Ok(context) => {
+                    (config, history_system, history_launch, override_launch) = context;
+                }
+                Err(error) => {
+                    self.message = Some(error.to_string());
+                    self.dirty = true;
+                    return None;
                 }
             }
         }
@@ -10096,6 +10091,44 @@ impl App {
             history_launch,
             override_launch,
         )
+    }
+
+    /// Shared favourite resolution for local selection and Web Access. Keep
+    /// the descriptor as the launch target, with its owner used for compatible
+    /// core choices and its cache target used for Last Played.
+    fn favorite_launch_context(
+        &self,
+        game: &browse::Launch,
+        mut config: SystemConfig,
+    ) -> Result<(SystemConfig, Option<String>, browse::Launch, browse::Launch)> {
+        let mut system = None;
+        let mut history = game.clone();
+        let mut overrides = game.clone();
+        if let browse::Launch::File(path) = game {
+            if let Some(reference) = crate::favorites::reference_of(path, &self.homes()) {
+                if let Some(crate::mgl::Diagnostic::Ambiguous(text)) = &reference.diagnostic {
+                    return Err(DegaussError::unsupported("favourite", text));
+                }
+                if let Some(id) = owner_of_favorite(&self.all_systems, &reference) {
+                    if let Some(owner) = self.all_systems.iter().find(|found| found.def.id == id) {
+                        config = owner.to_config();
+                        system = Some(id);
+                    }
+                }
+                history = match crate::launch::amiga_marker(path) {
+                    Some((install, title)) => browse::Launch::AmigaVision { install, title },
+                    None => browse::Launch::File(reference.cache_target.clone()),
+                };
+                overrides = match crate::launch::amiga_marker(path) {
+                    Some((install, title)) => browse::Launch::AmigaVision { install, title },
+                    None => browse::Launch::File(reference.owner_target.clone()),
+                };
+                if crate::zip::split_member_path(&reference.owner_target).is_some() {
+                    crate::zip::validate_member_for_launch(&reference.owner_target)?;
+                }
+            }
+        }
+        Ok((config, system, history, overrides))
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -10118,7 +10151,7 @@ impl App {
     }
 
     fn poll_boot_launch(&mut self, now: Instant) -> Option<Outcome> {
-        if !self.boot_launch_waiting {
+        if !self.boot_launch_waiting || self.web_writing() {
             return None;
         }
         if let Some(deadline) = self.boot_launch_deadline {
@@ -13441,6 +13474,7 @@ impl App {
             return;
         };
         match option_operation(option, input) {
+            OptionOperation::WebAccess(option) => self.open_web_option(option),
             OptionOperation::None => (),
             OptionOperation::OpenControllers => self.open_controllers(),
             OptionOperation::Adjust(delta) => self.adjust_option_value(option, delta),
@@ -13528,6 +13562,9 @@ impl App {
     }
 
     fn poll_ini_profiles(&mut self) -> Option<Outcome> {
+        if self.web_writing() {
+            return None;
+        }
         let result = self
             .ini_profile_job
             .as_ref()
@@ -13648,6 +13685,14 @@ impl App {
 
     fn adjust_option_value(&mut self, option: OptionId, delta: isize) {
         match option {
+            OptionId::WebMode => self.step_web_mode(delta),
+            OptionId::WebCrtImages => {
+                self.settings.web_crt_images = Some(!self.settings.web_crt_images.unwrap_or(false));
+            }
+            OptionId::WebPort
+            | OptionId::WebPassword
+            | OptionId::WebAddress
+            | OptionId::WebCertificate => {}
             // The cursor never rests on one, but a stale index after a
             // screen change must do nothing rather than something.
             OptionId::Spacer => {}
@@ -14161,6 +14206,41 @@ impl App {
 
     fn option_value(&self, option: OptionId) -> String {
         match option {
+            OptionId::WebMode => self
+                .settings
+                .web_access
+                .clone()
+                .unwrap_or_default()
+                .mode
+                .label()
+                .into(),
+            OptionId::WebPort => self
+                .settings
+                .web_access
+                .clone()
+                .unwrap_or_default()
+                .port
+                .to_string(),
+            OptionId::WebPassword => if crate::web::password_is_set(&self.web_directory()) {
+                "Change"
+            } else {
+                "Set"
+            }
+            .into(),
+            OptionId::WebAddress => {
+                let config = self.settings.web_access.clone().unwrap_or_default();
+                if config.mode == crate::web::Mode::Off {
+                    "Off".into()
+                } else {
+                    self.web
+                        .addresses
+                        .first()
+                        .map(|ip| config.address(*ip))
+                        .unwrap_or_else(|| "No network address".into())
+                }
+            }
+            OptionId::WebCertificate => ">".into(),
+            OptionId::WebCrtImages => on_off(self.settings.web_crt_images.unwrap_or(false)),
             OptionId::Controllers => ">".into(),
             OptionId::Speed => speed_label(self.speed),
             OptionId::ArtLimit => {
@@ -14922,7 +15002,11 @@ impl App {
 
     fn context_scope(&self) -> String {
         if self.explore.active {
-            return format!("Explore Games / {} matches", self.explore.matches.len());
+            return format!(
+                "{} / {} matches",
+                self.here_label(),
+                self.explore.matches.len()
+            );
         }
         if self.in_misterzine_browser() {
             return MISTERZINE_CATEGORY.to_string();
@@ -15660,6 +15744,8 @@ impl App {
     fn finish_name_keyboard(&mut self) {
         let draft = self.name_keyboard_draft.clone();
         match self.name_keyboard_purpose.clone() {
+            NamePurpose::WebPassword => self.finish_web_password(&draft),
+            NamePurpose::WebPort => self.finish_web_port(&draft),
             NamePurpose::UnlockKiosk => {
                 let correct = self
                     .config
@@ -15770,6 +15856,24 @@ impl App {
     }
 
     fn handle_name_keyboard(&mut self, action: Action) {
+        if matches!(
+            self.name_keyboard_purpose,
+            NamePurpose::WebPassword | NamePurpose::WebPort
+        ) {
+            let key = name_keyboard::keys(self.name_keyboard_page, true)
+                .get(self.name_keyboard_list.selected())
+                .copied();
+            if action == Action::Quit || (action == Action::Accept && key == Some(NameKey::Cancel))
+            {
+                self.name_keyboard_draft.clear();
+                self.open_options_page(OptionsPage::WebAccess);
+                return;
+            }
+            if action == Action::Accept && key == Some(NameKey::Save) {
+                self.finish_name_keyboard();
+                return;
+            }
+        }
         if self.name_keyboard_purpose == NamePurpose::UnlockKiosk && action == Action::Quit {
             self.name_keyboard_draft.clear();
             if self.network_plan.is_some() {
@@ -20413,6 +20517,28 @@ impl App {
         self.rebuild_ordinary_system(&id);
     }
 
+    fn cancel_index(&mut self) {
+        if let Some(build) = self.build.as_mut() {
+            build.cancelling = true;
+            if let Some(job) = &build.job {
+                job.cancel();
+            }
+            if let Some(Discovery::Running(job)) = &build.discovery {
+                job.cancel();
+            }
+            build.displayed = None;
+        }
+        if let Some(job) = &self.source_resolution {
+            self.source_resolution_cancelled = true;
+            job.cancel();
+        }
+        if let Some(job) = &self.source_job {
+            self.source_cancelling = true;
+            job.cancel();
+        }
+        self.publish_index_progress();
+    }
+
     /// The ordinary single-system rebuild: read its folders again.
     fn rebuild_ordinary_system(&mut self, id: &str) {
         self.invalidate_storage_check();
@@ -20445,8 +20571,10 @@ impl App {
                 return;
             }
         }
-        self.opened_config = Some(self.all_systems[at].to_config());
-        self.library = None;
+        if self.open_system.as_deref() == Some(id) {
+            self.opened_config = Some(self.all_systems[at].to_config());
+            self.library = None;
+        }
         self.build = Some(Building {
             left: vec![at],
             done: 0,
@@ -20473,6 +20601,25 @@ impl App {
     }
 
     pub fn handle(&mut self, action: Action) -> Option<Outcome> {
+        // Browser library transactions use the same cache/settings files.
+        // Keep scrolling responsive, but do not start a second transaction or
+        // leave the frontend while a browser write is committing.
+        let web_navigation = matches!(action, Action::Up | Action::Down)
+            || (matches!(action, Action::Slower | Action::Faster)
+                && (matches!(self.screen, Screen::Find | Screen::CategoryImage)
+                    || (self.screen == Screen::Browse && self.horizontal != Horizontal::Speed)));
+        if self.web_writing() && !web_navigation {
+            if self.pending.is_some() {
+                return None;
+            }
+            if action == Action::Quit && self.message.is_some() {
+                self.message = None;
+                self.dirty = true;
+            } else {
+                self.defer_for_web_write();
+            }
+            return None;
+        }
         // Game launches do not use Pending. Do not accept maintenance or
         // configuration questions, but let a Pack question resume browsing.
         if self.kiosk_locked && self.pending.is_some() {
@@ -20654,26 +20801,7 @@ impl App {
                     self.index_details = false;
                     self.message = None;
                 }
-                Action::Quit if self.build.is_some() => {
-                    let build = self.build.as_mut().expect("active build");
-                    build.cancelling = true;
-                    if let Some(job) = &build.job {
-                        job.cancel();
-                    }
-                    if let Some(Discovery::Running(job)) = &build.discovery {
-                        job.cancel();
-                    }
-                    if let Some(job) = &self.source_resolution {
-                        self.source_resolution_cancelled = true;
-                        job.cancel();
-                    }
-                    if let Some(job) = &self.source_job {
-                        self.source_cancelling = true;
-                        job.cancel();
-                    }
-                    build.displayed = None;
-                    self.publish_index_progress();
-                }
+                Action::Quit if self.build.is_some() => self.cancel_index(),
                 Action::Quit => {
                     self.index_terminal = None;
                     self.message = None;
@@ -22868,6 +22996,8 @@ impl App {
             ),
             Screen::NameKeyboard => (
                 match self.name_keyboard_purpose {
+                    NamePurpose::WebPassword => "Set Web Password".to_string(),
+                    NamePurpose::WebPort => "Set Web Port".to_string(),
                     NamePurpose::SaveView => "Save Custom View".to_string(),
                     NamePurpose::RenameView(_) => "Rename Custom View".to_string(),
                     NamePurpose::HomeFolder => "New Personal Folder".to_string(),
@@ -23263,7 +23393,10 @@ impl App {
             self.ui.set_find_query(self.filter.clone().into());
         } else if self.screen == Screen::NameKeyboard {
             self.ui.set_find_query(
-                if self.name_keyboard_purpose == NamePurpose::UnlockKiosk {
+                if matches!(
+                    self.name_keyboard_purpose,
+                    NamePurpose::UnlockKiosk | NamePurpose::WebPassword
+                ) {
                     "*".repeat(self.name_keyboard_draft.len())
                 } else {
                     self.name_keyboard_draft.clone()
@@ -23300,6 +23433,7 @@ impl App {
                 && self.ini_profile_action.is_none(),
         );
         self.ui.set_overlay(SharedString::from(overlay));
+        self.update_web_qr();
     }
     fn stats_line(&self) -> String {
         let summary = self.timer.summary();
@@ -23426,25 +23560,27 @@ impl App {
                 self.message = Some(message);
                 self.dirty = true;
             }
-            match physical_discs.poll(now) {
-                Ok(crate::physical_disc::Poll::Idle) => {}
-                Ok(crate::physical_disc::Poll::Checked(event)) => {
-                    physical_disc_error = None;
-                    if let Some(event) = event {
-                        if let Some(outcome) = self.handle_physical_disc_event(event) {
-                            self.save_settings();
-                            return Ok(outcome);
+            if !self.web_writing() {
+                match physical_discs.poll(now) {
+                    Ok(crate::physical_disc::Poll::Idle) => {}
+                    Ok(crate::physical_disc::Poll::Checked(event)) => {
+                        physical_disc_error = None;
+                        if let Some(event) = event {
+                            if let Some(outcome) = self.handle_physical_disc_event(event) {
+                                self.save_settings();
+                                return Ok(outcome);
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    let message = format!("Physical disc detection failed: {error}");
-                    if physical_disc_error.as_deref() != Some(message.as_str()) {
-                        crate::note(&format!("physical disc  {message}"));
-                        self.message = Some(message.clone());
-                        self.dirty = true;
+                    Err(error) => {
+                        let message = format!("Physical disc detection failed: {error}");
+                        if physical_disc_error.as_deref() != Some(message.as_str()) {
+                            crate::note(&format!("physical disc  {message}"));
+                            self.message = Some(message.clone());
+                            self.dirty = true;
+                        }
+                        physical_disc_error = Some(message);
                     }
-                    physical_disc_error = Some(message);
                 }
             }
 
@@ -23468,6 +23604,12 @@ impl App {
                 return Ok(outcome);
             }
             self.poll_misterzine();
+            if let Some(outcome) = self.poll_web() {
+                if !matches!(outcome, Outcome::Script(_)) {
+                    self.save_settings();
+                }
+                return Ok(outcome);
+            }
             self.maintain_misterzine_games(now);
             self.open_deferred_network_system();
             if let Some(outcome) = self.poll_ini_profiles() {
@@ -23947,6 +24089,7 @@ impl App {
                     .as_ref()
                     .map(|origin| Box::new(origin.position.clone())),
                 pivots: self.explore.pivots.clone(),
+                collection_edits: self.explore.collection_edits.clone(),
             });
             return saved;
         }
@@ -24013,6 +24156,20 @@ impl App {
                 return;
             }
             self.restore_home(resume.clone());
+            // A collection pinned to Home has both a return destination and
+            // an Explore draft. After playing a result, reopen that draft
+            // over its original folder.
+            if saved.system == crate::explore::STATE_ID
+                && saved.explore.is_some()
+                && saved.selected_row.is_some()
+                && resume
+                    .anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.system == crate::explore::STATE_ID)
+            {
+                self.home.origin = Some(resume.clone());
+                self.explore.pending_resume = Some(saved.clone());
+            }
             return;
         }
         if saved.system == crate::explore::STATE_ID {

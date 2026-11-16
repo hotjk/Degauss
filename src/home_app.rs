@@ -456,11 +456,7 @@ impl App {
                 });
                 self.open_category_named(category);
             }
-            Target::Collection { collection } => {
-                if let Some(saved) = self.settings.collections.get(&collection) {
-                    self.open_explore(Some(saved.query.clone()));
-                }
-            }
+            Target::Collection { collection } => self.open_explore_collection(collection),
             Target::System { ref system }
             | Target::LibraryFolder { ref system, .. }
             | Target::Game { ref system, .. } => {
@@ -535,6 +531,7 @@ impl App {
 
     fn poll_home_open(&mut self) -> Option<Outcome> {
         if self.screen != Screen::Browse
+            || self.web_writing()
             || self.opening.is_some()
             || self.source_resolution.is_some()
             || self.source_job.is_some()
@@ -1375,7 +1372,9 @@ impl App {
                                     Browsing::Games
                                 }
                     });
-                if at_entry {
+                // A related search inside a pinned collection goes back to
+                // that draft first, not straight to the Home shortcut.
+                if at_entry && (!self.explore.active || self.explore.pivots.is_empty()) {
                     self.restore_home(origin);
                     return Some(None);
                 }
